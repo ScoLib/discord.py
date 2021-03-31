@@ -25,9 +25,12 @@ DEALINGS IN THE SOFTWARE.
 """
 
 import asyncio
+import hashlib
 import logging
+import os
 import signal
 import sys
+import tempfile
 import traceback
 
 import aiohttp
@@ -228,6 +231,7 @@ class Client:
         self.ws = None
         self.loop = asyncio.get_event_loop() if loop is None else loop
         self._listeners = {}
+        self.cache_auth = options.get('cache_auth', True)
         self.shard_id = options.get('shard_id')
         self.shard_count = options.get('shard_count')
 
@@ -249,6 +253,7 @@ class Client:
         self._connection.shard_count = self.shard_count
         self._closed = False
         self._ready = asyncio.Event()
+        self._is_logged_in = asyncio.Event()
         self._connection._get_websocket = self._get_websocket
         self._connection._get_client = lambda: self
 
@@ -267,6 +272,37 @@ class Client:
 
     async def _syncer(self, guilds):
         await self.ws.request_sync(guilds)
+
+    def _get_cache_filename(self, email):
+        filename = hashlib.md5(email.encode('utf-8')).hexdigest()
+        return os.path.join(tempfile.gettempdir(), 'discord_py', filename)
+
+    def _get_cache_token(self, email, password):
+        try:
+            log.info('attempting to login via cache')
+            cache_file = self._get_cache_filename(email)
+            self.email = email
+            with open(cache_file, 'r') as f:
+                log.info('login cache file found')
+                return f.read()
+
+            # at this point our check failed
+            # so we have to login and get the proper token and then
+            # redo the cache
+        except OSError:
+            log.info('a problem occurred while opening login cache')
+            return None # file not found et al
+
+    def _update_cache(self, email, password):
+        try:
+            cache_file = self._get_cache_filename(email)
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+            with os.fdopen(os.open(cache_file, os.O_WRONLY | os.O_CREAT, 0o0600), 'w') as f:
+                log.info('updating login cache')
+                f.write(self.http.token)
+        except OSError:
+            log.info('a problem occurred while updating the login cache')
+            pass
 
     def _handle_ready(self):
         self._ready.set()
@@ -470,46 +506,72 @@ class Client:
         if not initial:
             await asyncio.sleep(5.0)
 
+
+    async def _login_1(self, token, **kwargs):
+        log.info('logging in using static token')
+        is_bot = kwargs.pop('bot', True)
+        await self.http.static_login(token, bot=is_bot)
+
+        self._connection.is_bot = is_bot
+        self._is_logged_in.set()
+
+    async def _login_2(self, email, password, **kwargs):
+        # attempt to read the token from cache
+        self._connection.is_bot = False
+
+        if self.cache_auth:
+            token = self._get_cache_token(email, password)
+            try:
+                await self.http.static_login(token, bot=False)
+            except:
+                log.info('cache auth token is out of date')
+            else:
+                self._is_logged_in.set()
+                return
+
+        await self.http.email_login(email, password)
+        self._is_logged_in.set()
+
+        # since we went through all this trouble
+        # let's make sure we don't have to do it again
+        if self.cache_auth:
+            self._update_cache(email, password)
+
     # login state management
 
-    async def login(self, token, *, bot=True):
+    async def login(self, *args, **kwargs):
         """|coro|
-
         Logs in the client with the specified credentials.
-
         This function can be used in two different ways.
-
-        .. warning::
-
-            Logging on with a user token is against the Discord
-            `Terms of Service <https://support.discord.com/hc/en-us/articles/115002192352>`_
-            and doing so might potentially get your account banned.
-            Use this at your own risk.
-
+        .. code-block:: python
+            await client.login('token')
+            # or
+            await client.login('email', 'password')
+        More than 2 parameters or less than 1 parameter raises a
+        :exc:`TypeError`.
         Parameters
         -----------
-        token: :class:`str`
-            The authentication token. Do not prefix this token with
-            anything as the library will do it for you.
-        bot: :class:`bool`
+        bot : bool
             Keyword argument that specifies if the account logging on is a bot
-            token or not.
-
-            .. deprecated:: 1.7
-
+            token or not. Only useful for logging in with a static token.
+            Ignored for the email and password combo. Defaults to ``True``.
         Raises
         ------
-        :exc:`.LoginFailure`
+        LoginFailure
             The wrong credentials are passed.
-        :exc:`.HTTPException`
+        HTTPException
             An unknown HTTP related error occurred,
             usually when it isn't 200 or the known incorrect credentials
             passing status code.
+        TypeError
+            The incorrect number of parameters is passed.
         """
-
-        log.info('logging in using static token')
-        await self.http.static_login(token.strip(), bot=bot)
-        self._connection.is_bot = bot
+        
+        n = len(args)
+        if n in (2, 1):
+            await getattr(self, '_login_' + str(n))(*args, **kwargs)
+        else:
+            raise TypeError('login() takes 1 or 2 positional arguments but {} were given'.format(n))
 
     @utils.deprecated('Client.close')
     async def logout(self):

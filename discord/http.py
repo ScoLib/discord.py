@@ -99,7 +99,7 @@ class HTTPClient:
     def __init__(self, connector=None, *, proxy=None, proxy_auth=None, loop=None, unsync_clock=True):
         self.loop = asyncio.get_event_loop() if loop is None else loop
         self.connector = connector
-        self.__session = None # filled in static_login
+        self.__session = aiohttp.ClientSession(connector=self.connector, ws_response_class=DiscordClientWebSocketResponse)
         self._locks = weakref.WeakValueDictionary()
         self._global_over = asyncio.Event()
         self._global_over.set()
@@ -290,9 +290,24 @@ class HTTPClient:
 
     # login management
 
+    async def email_login(self, email, password):
+        payload = {
+            'email': email,
+            'password': password
+        }
+
+        try:
+            data = await self.request(Route('POST', '/auth/login'), json=payload)
+        except HTTPException as e:
+            if e.response.status == 400:
+                raise LoginFailure('Improper credentials have been passed.') from e
+            raise
+
+        self._token(data['token'], bot=False)
+
+        return data
+
     async def static_login(self, token, *, bot):
-        # Necessary to get aiohttp to stop complaining about session creation
-        self.__session = aiohttp.ClientSession(connector=self.connector, ws_response_class=DiscordClientWebSocketResponse)
         old_token, old_bot = self.token, self.bot_token
         self._token(token, bot=bot)
 
