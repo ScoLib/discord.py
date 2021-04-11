@@ -25,6 +25,7 @@ DEALINGS IN THE SOFTWARE.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import sys
@@ -108,6 +109,8 @@ class HTTPClient:
         self.proxy = proxy
         self.proxy_auth = proxy_auth
         self.use_clock = not unsync_clock
+        self.fingerprint = None
+        self.super_properties = None
 
         user_agent = 'DiscordBot (https://github.com/Rapptz/discord.py {0}) Python/{1[0]}.{1[1]} aiohttp/{2}'
         self.user_agent = user_agent.format(__version__, sys.version_info, aiohttp.__version__)
@@ -143,10 +146,9 @@ class HTTPClient:
                 self._locks[bucket] = lock
 
         # header creation
-        headers = {
-            'User-Agent': self.user_agent,
-            'X-Ratelimit-Precision': 'millisecond',
-        }
+        headers = kwargs.pop('headers', {})
+        headers['User-Agent'] = self.user_agent
+        headers['X-Ratelimit-Precision'] = 'millisecond'
 
         if self.token is not None:
             headers['Authorization'] = 'Bot ' + self.token if self.bot_token else self.token
@@ -277,6 +279,40 @@ class HTTPClient:
             else:
                 raise HTTPException(resp, 'failed to get asset')
 
+    def get_context_properties(self, guild_id, channel_id):
+        properties = {
+            "location": "Accept Invite Page",
+            "location_guild_id": guild_id,
+            "location_channel_id": channel_id,
+            "location_channel_type": 0
+        }
+
+        b64_sp = base64.b64encode((str(properties).encode()))
+        return b64_sp.decode()
+
+    def get_super_properties(self):
+        # Create X-Super-Properties
+        super_properties = {
+            "os": "Windows",
+            "browser": "Chrome",
+            "device": "",
+            "system_locale": "zh-CN",
+            "browser_user_agent": self.user_agent,
+            "browser_version": "86.0.4240.198",
+            "os_version": "10",
+            "referrer": "",
+            "referring_domain": "",
+            "referrer_current": "",
+            "referring_domain_current": "",
+            "release_channel": "stable",
+            "client_build_number": 81972,
+            "client_event_source": None
+        }
+
+        b64_sp = base64.b64encode((str(super_properties).encode()))
+        self.super_properties = b64_sp.decode()
+        return self.super_properties
+
     # state management
 
     async def close(self):
@@ -287,6 +323,41 @@ class HTTPClient:
         self.token = token
         self.bot_token = bot
         self._ack_token = None
+
+    async def get_fingerprint(self):
+        # https://discord.com/api/v8/experiments give the X-Fingerprint
+        # if it doesn't exist in the headers of the request
+
+        res = await self.request(Route('GET', '/experiments'))
+
+        self.fingerprint = res['fingerprint']
+
+        return self.fingerprint
+
+    # register
+    
+    async def register(self, email, password, username, date_of_birth, fingerprint):
+        payload = {
+            "fingerprint": fingerprint,
+            "email": email,
+            "password": password,
+            "username": username,
+            "invite": None,
+            "date_of_birth": date_of_birth,
+            "consent": "true",
+            "captcha_key": None,
+            "login_source": None,
+            "gift_code_sku_id": None
+        }
+
+        if self.fingerprint is None:
+            self.get_fingerprint()
+
+        return await self.request(Route('POST', '/auth/register'), json=payload, headers={
+            "referer": 'https://discord.com/register',
+            "X-Fingerprint": self.fingerprint,
+            "X-Super-Properties": self.super_properties
+        })
 
     # login management
 
@@ -875,6 +946,14 @@ class HTTPClient:
             'with_counts': int(with_counts)
         }
         return self.request(Route('GET', '/invites/{invite_id}', invite_id=invite_id), params=params)
+
+    def use_invite(self, invite):
+        print(invite)
+        # return self.request(Route('POST', '/invites/{invite_id}', invite_id=invite_id), headers={
+        #     "referer": 'https://discord.com/' + invite.id,
+        #     "x-Context-Properties": self.get_context_properties(invite.guild, invite.channel),
+        #     "X-Super-Properties": self.super_properties
+        # })
 
     def invites_from(self, guild_id):
         return self.request(Route('GET', '/guilds/{guild_id}/invites', guild_id=guild_id))
