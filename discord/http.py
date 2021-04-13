@@ -52,7 +52,7 @@ async def json_or_text(response):
     return text
 
 class Route:
-    BASE = 'https://discord.com/api/v7'
+    BASE = 'https://discord.com/api/v8'
 
     def __init__(self, method, path, **parameters):
         self.path = path
@@ -327,18 +327,26 @@ class HTTPClient:
     async def get_fingerprint(self):
         # https://discord.com/api/v8/experiments give the X-Fingerprint
         # if it doesn't exist in the headers of the request
+        old_token = self.token
+        old_bot = self.bot_token
+        self._token(None, bot=old_bot)
+        ret = await self.request(Route('GET', '/experiments'))
+        self._token(old_token, bot=old_bot)
 
-        res = await self.request(Route('GET', '/experiments'))
-
-        self.fingerprint = res['fingerprint']
+        self.fingerprint = ret['fingerprint']
 
         return self.fingerprint
 
     # register
     
-    async def register(self, email, password, username, date_of_birth, fingerprint):
+    async def register(self, email, password, username, date_of_birth):
+        if self.fingerprint is None:
+            await self.get_fingerprint()
+
+        self.get_super_properties()
+
         payload = {
-            "fingerprint": fingerprint,
+            "fingerprint": self.fingerprint,
             "email": email,
             "password": password,
             "username": username,
@@ -350,9 +358,7 @@ class HTTPClient:
             "gift_code_sku_id": None
         }
 
-        if self.fingerprint is None:
-            self.get_fingerprint()
-
+        # {'token': 'xxx'}
         return await self.request(Route('POST', '/auth/register'), json=payload, headers={
             "referer": 'https://discord.com/register',
             "X-Fingerprint": self.fingerprint,
@@ -948,12 +954,13 @@ class HTTPClient:
         return self.request(Route('GET', '/invites/{invite_id}', invite_id=invite_id), params=params)
 
     def use_invite(self, invite):
-        print(invite)
-        # return self.request(Route('POST', '/invites/{invite_id}', invite_id=invite_id), headers={
-        #     "referer": 'https://discord.com/' + invite.id,
-        #     "x-Context-Properties": self.get_context_properties(invite.guild, invite.channel),
-        #     "X-Super-Properties": self.super_properties
-        # })
+        self.get_super_properties()
+
+        return self.request(Route('POST', '/invites/{invite_id}', invite_id=invite.id), headers={
+            "referer": f'https://discord.com/invite/{invite.id}',
+            "x-Context-Properties": self.get_context_properties(invite.guild.id, invite.channel.id),
+            "X-Super-Properties": self.super_properties
+        })
 
     def invites_from(self, guild_id):
         return self.request(Route('GET', '/guilds/{guild_id}/invites', guild_id=guild_id))
